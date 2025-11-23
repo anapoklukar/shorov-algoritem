@@ -6,6 +6,7 @@ import numpy as np
 from math import gcd, floor
 from fractions import Fraction
 from IPython.display import display
+import time   ### ADDED
 
 from qiskit_aer import AerSimulator
 from qiskit.transpiler import generate_preset_pass_manager
@@ -42,7 +43,7 @@ def ctrl_mult_gate(a, binary_power, N):
         if (value >> i) & 1:
             qc.x(i)
 
-    return qc.to_gate(label=f"{a}^(2^{binary_power}) mod {N}").control()
+    return qc.to_gate(label=f"{a}^{2**binary_power} mod {N}").control()
 
 
 # ----------------------------------------------------------
@@ -84,11 +85,13 @@ def build_qpe_circuit(a, N):
 def try_extract_factors(a, measurement, n, N):
     decimal_value = int(measurement, 2)
     r = denominator(decimal_value, n, N)
+    #print(f"Trying measurement {measurement} (decimal {decimal_value}) → r = {r}")
     #print(f"Measured {measurement} → {decimal_value} → r ≈ {r}")
     if not isinstance(r, int) or r % 2 != 0:
         return None
 
     x = pow(a, r // 2, N)
+    #print(f"Computed x = a^(r/2) mod N = {x}")
     f1 = gcd(x - 1, N)
     f2 = gcd(x + 1, N)
 
@@ -110,13 +113,13 @@ def try_extract_factors(a, measurement, n, N):
 # ----------------------------------------------------------
 # Shor algorithm main function
 # ----------------------------------------------------------
-def factor_with_shor(N, shots=1024, use_ibmq=False):
+def factor_with_shor(N, shots=1024, use_ibmq=False, draw=False):   ### ADDED draw argument
     n = floor(np.log2(N - 1)) + 1
 
     if use_ibmq:
         print("\nUsing IBM backend...")
         service = QiskitRuntimeService()
-        backend = service.backend("ibm_fez")
+        backend = service.backend("ibm_torino")
 
         sampler = Sampler(backend)
         sampler.options.dynamical_decoupling.enable = True
@@ -124,19 +127,28 @@ def factor_with_shor(N, shots=1024, use_ibmq=False):
         sampler.options.twirling.enable_gates = True
 
     # Choose random a coprime to N
+    a = random.randint(2, N - 1)
+
     while True:
-        a = random.randint(2, N - 1)
-        if gcd(a, N) == 1:
-            break
+        d = gcd(a, N)
+        if d != 1:
+            # nontrivial factor found
+            print(f"Lucky guess of a = {a}, found factor {d}")
+            print(f"\nSUCCESS: {N} = {d} x {N // d}")
+            return (d, N // d)
 
-    print(f"\nChosen a = {a}")
-
+        # gcd == 1 → good a
+        break
+    
     # Build QPE circuit
     qpe = build_qpe_circuit(a, N)
-    try:
-        qpe.draw(output="mpl", fold=-1).savefig("shor_qpe_circuit.png")
-    except:
-        pass
+    #print("Number of qubits used:", qpe.num_qubits)
+    ### ADDED drawing
+    if draw:
+        try:
+            qpe.draw(output="mpl", fold=-1).savefig("shor_qpe_circuit.pdf", format="pdf")
+        except:
+            pass
 
     # Run
     if use_ibmq:
@@ -150,17 +162,67 @@ def factor_with_shor(N, shots=1024, use_ibmq=False):
         result = sim.run(compiled, shots=shots).result()
         counts = result.get_counts()
 
-    plot_histogram(counts, figsize=(35, 5)).savefig("shor_measurement_histogram.png")
-    sorted_measurements = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    if draw:
+        try:
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(12, 5))         # smaller & tighter
+            plot_histogram(counts, ax=ax)
 
-    for meas, _ in sorted_measurements:
-        factors = try_extract_factors(a, meas, n, N)
-        if factors:
-            print(f"\nSUCCESS: {N} = {factors[0]} x {factors[1]}")
-            return factors
+            ax.set_ylabel("Število meritev")
 
-    print("\nFailed to factor N.")
+            fig.tight_layout(pad=0.4)                       # tighter layout
+            fig.savefig("shor_histogram.pdf", format="pdf")
+        except:
+            pass
+
+    # Dictionary of bitstrings and their counts to keep
+    counts_keep = {}
+    # Threshold to filter
+    threshold = np.max(list(counts.values())) / 2
+    
+    for key, value in counts.items():
+        if value > threshold:
+            counts_keep[key] = value
+    
+    #print(counts_keep)
+
+    factors = try_extract_factors(a, list(counts_keep.keys())[0], n, N)
+
+    if factors:
+        print(f"\nSUCCESS: {N} = {factors[0]} x {factors[1]}")
+        return factors
+
+    print("\nFailed to factor N from a single measurement.")
     return None
+
+
+# ----------------------------------------------------------
+# BENCHMARK (ADDED)
+# ----------------------------------------------------------
+def benchmark(N, shots=1024, runs=100, use_ibmq=False):
+    print(f"\nRunning benchmark: {runs} runs for N={N}")
+    successes = 0
+    failures = 0
+    total_time = 0.0
+
+    for _ in range(runs):
+        start = time.time()
+        result = factor_with_shor(N, shots=shots, use_ibmq=use_ibmq, draw=False)
+        total_time += time.time() - start
+
+        if result == (3, 5) or result == (5, 3):
+            successes += 1
+        else:
+            failures += 1
+
+    avg_time = total_time / runs
+
+    print("\n--- Benchmark Results ---")
+    print(f"Successes: {successes}")
+    print(f"Failures: {failures}")
+    print(f"Success rate: {successes/runs*100:.2f}%")
+    print(f"Average time: {avg_time:.4f} seconds")
+    print("-------------------------\n")
 
 
 # ----------------------------------------------------------
@@ -172,9 +234,18 @@ def main():
     parser.add_argument("-s", "--shots", type=int, default=1024, help="Number of shots")
     parser.add_argument("--ibm", action="store_true", help="Use IBM backend instead of local simulator")
 
+    parser.add_argument("--draw", action="store_true", help="Draw circuit & histogram")   ### ADDED
+    parser.add_argument("--benchmark", type=int, nargs="?", const=100,
+                        help="Benchmark mode (default 100 runs)")   ### ADDED
+
     args = parser.parse_args()
 
-    factor_with_shor(N=args.N, shots=args.shots, use_ibmq=args.ibm)
+    ### ADDED logic
+    if args.benchmark:
+        benchmark(args.N, shots=args.shots, runs=args.benchmark, use_ibmq=args.ibm)
+        return
+
+    factor_with_shor(args.N, shots=args.shots, use_ibmq=args.ibm, draw=args.draw)   
 
 
 if __name__ == "__main__":
