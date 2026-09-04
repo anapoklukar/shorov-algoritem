@@ -1,6 +1,7 @@
 # Shor's Algorithm
 
 **Authors:** Blaž Grilj, Ana Poklukar
+
 **Date:** November 2025
 
 ---
